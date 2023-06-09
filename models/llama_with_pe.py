@@ -116,18 +116,9 @@ class LlamaRotaryEmbedding(torch.nn.Module):
         self.register_buffer("omega", torch.tensor(omega).to(device), persistent=False)
         self.register_buffer("expos", torch.tensor(np.sqrt(expos / bias)).to(device), persistent=False)
 
-        if not pe_config['imp'] and not pe_config['exp']:
-            self.register_buffer("inv_freq", torch.arange(0, dim, 1 if pe_config['1d'] else 2).to(device))
-        elif not pe_config['imp'] and pe_config['exp'] and pe_config['1d']:
-            scale = (torch.arange(0, dim, 1) + 0.4 * dim) / (1.4 * dim)
-            self.register_buffer("scale", scale)
-            inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 1).float().to(device) / dim))
-            self.register_buffer("inv_freq", inv_freq)
-        elif not pe_config['imp'] and pe_config['exp'] and not pe_config['1d']:
-            scale = (torch.arange(0, dim, 2) + 0.4 * dim) / (1.4 * dim)
-            self.register_buffer("scale", torch.cat((scale, scale), dim=-1) if pe_config['log'] else scale)
-            inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float().to(device) / dim))
-            self.register_buffer("inv_freq", torch.cat((inv_freq, inv_freq), dim=-1) if pe_config['log'] else inv_freq)
+        if pe_config['exp']:
+            scale = - torch.log(torch.tensor(omega).to(device)) / math.log(10000)
+            self.register_buffer("scale", ((scale + 0.4 * dim) / (1.4 * dim)), persistent=False)
 
     def forward(self, x, seq_len=None):
         # x: [bs, num_attention_heads, seq_len, head_size]
@@ -188,10 +179,7 @@ class LlamaAttention(nn.Module):
         self.k_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.v_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
-        if pe_config['exp'] and not pe_config['imp']:
-            self.xpos = LlamaRotaryEmbedding(dim=self.head_dim, pe_config=pe_config)
-        else:
-            self.rotary_emb = LlamaRotaryEmbedding(dim=self.head_dim, pe_config=pe_config)
+        self.rotary_emb = LlamaRotaryEmbedding(dim=self.head_dim, pe_config=pe_config)
         if pe_config['flash']:
             self.flash_attn = FlashAttention(softmax_scale=1 / math.sqrt(self.head_dim), attention_dropout=0.)
 
@@ -213,14 +201,8 @@ class LlamaAttention(nn.Module):
             k_real = k * cos + rotate_half(k) * sin
             # q_imag = q * sin - rotate_half(q) * cos
 
-        if self.pe_config['exp'] and not self.pe_config['imp']:
-            scale = self.xpos.scale[None, :] ** ((t - q_len // 2) / 512)
-            scale = scale if not self.pe_config['1d'] and self.pe_config['log'] else torch.cat([scale, scale], dim=-1)
-            q_real = q_real * scale[None, None, :, :]
-            k_real = k_real / scale[None, None, :, :]
-        elif self.pe_config['exp'] and self.pe_config['imp']:
-            i = - torch.log(self.rotary_emb.omega) / math.log(10000)
-            scale = ((i + 0.4 * self.head_dim) / (1.4 * self.head_dim)) ** ((t - q_len // 2) / 512)
+        if self.pe_config['exp']:
+            scale = self.rotary_emb.scale ** ((t - q_len // 2) / 512)
             scale = scale if not self.pe_config['1d'] else torch.cat([scale, scale], dim=-1)
             q_real = q_real * scale[None, None, :, :]
             k_real = k_real / scale[None, None, :, :]
@@ -248,10 +230,7 @@ class LlamaAttention(nn.Module):
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
             kv_seq_len += past_key_value[0].shape[-2]
-        if self.pe_config['exp'] and not self.pe_config['imp']:
-            cos, sin, expos = self.xpos(value_states, seq_len=kv_seq_len)
-        else:
-            cos, sin, expos = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        cos, sin, expos = self.rotary_emb(value_states, seq_len=kv_seq_len)
 
         query_states, key_states = self.apply_rotary_pos_emb(query_states, key_states, cos, sin, expos, q_len)
         # [bsz, nh, t, hd], query_states_
