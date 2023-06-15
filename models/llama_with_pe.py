@@ -117,7 +117,11 @@ class LlamaRotaryEmbedding(torch.nn.Module):
         self.register_buffer("expos", torch.tensor(np.sqrt(expos / bias)).to(device), persistent=False)
 
         if pe_config['exp']:
-            scale = - torch.log(torch.tensor(omega).to(device)) / math.log(10000)
+            if pe_config['imp']:
+                scale = - torch.log(torch.tensor(omega).to(device)) / math.log(10000) * dim
+            else:
+                scale = torch.arange(0, dim, 1 if pe_config['1d'] else 2)
+                scale = torch.cat([scale, scale], dim=-1)
             self.register_buffer("scale", ((scale + 0.4 * dim) / (1.4 * dim)), persistent=False)
 
     def forward(self, x, seq_len=None):

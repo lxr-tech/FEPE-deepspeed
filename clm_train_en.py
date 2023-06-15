@@ -17,34 +17,55 @@ from configs.clm_base_en_config import model_args, train_args
 import deepspeed
 from transformers.deepspeed import HfDeepSpeedConfig
 
+import sys
 
-# todo: https://huggingface.co/docs/transformers/main_classes/deepspeed
+keys = {
+    'alibi': ('', ''),
+
+    'rope_inv_2d_raw': ('', ''),
+    'rope_inv_2d_log': ('', ''),
+    'rope_inv_1d_raw': ('', ''),
+    'rope_inv_1d_log': ('', ''),
+
+    'xpos_inv_2d_raw': ('', ''),
+    'xpos_inv_2d_log': ('', ''),
+    'xpos_inv_1d_raw': ('', ''),
+    'xpos_inv_1d_log': ('', ''),
+
+    'rope_imp_2d_raw': ('', ''),
+    'rope_imp_2d_log': ('', ''),
+    'rope_imp_1d_raw': ('', ''),
+    'rope_imp_1d_log': ('', ''),
+
+    'xpos_imp_2d_raw': ('', ''),
+    'xpos_imp_2d_log': ('', ''),
+    'xpos_imp_1d_raw': ('', ''),
+    'xpos_imp_1d_log': ('', ''),
+}
 
 setup_seed(42)
 torch.set_default_dtype(torch.bfloat16)
 
 max_length = 2048
 model_tag = 'clm_arxiv_1'
-model_type = 'rope'  # 'fepe', 'rope', 'rope_v', 'xpos', 'xpos_v', 'alibi'
 
-if model_type == 'fepe':
-    from models.llama_with_fepe import LlamaForCausalLM
-elif model_type == 'rope':
-    from models.llama_with_rope import LlamaForCausalLM
-elif model_type == 'rope_v':
-    from models.llama_with_rope_v import LlamaForCausalLM
-elif model_type == 'xpos':
-    from models.llama_with_xpos import LlamaForCausalLM
-elif model_type == 'xpos_v':
-    from models.llama_with_xpos_v import LlamaForCausalLM
-elif model_type == 'alibi':
+key, modification = sys.argv[2], '' if len(sys.argv) <= 2 else sys.argv[3]
+if key not in keys:
+    raise KeyError(f'{key} is not supported in {list(keys)}')
+
+if key == 'alibi':
     from models.llama_with_alibi import LlamaForCausalLM
+elif key.startswith('rope') or key.startswith('xpos'):
+    from models.llama_with_pe import LlamaForCausalLM
 else:
-    raise KeyError('only support fepe, rope, xpos and alibi')
+    raise KeyError('only support rope, xpos and alibi')
 
 assert model_tag in model_args and (model_tag, max_length) in train_args
 
 model_args, train_args = model_args[model_tag], train_args[(model_tag, max_length)]
+
+pe_config = {'exp': key.__contains__('xpos'), '1d': key.__contains__('1d'),
+             'imp': key.__contains__('imp'), 'log': key.__contains__('log'), 'flash': False}
 
 # todo: https://www.deepspeed.ai/docs/config-json/
 
@@ -63,7 +84,7 @@ with deepspeed.zero.Init(dtype=torch.bfloat16, config_dict_or_path=ds_config):
     config.num_attention_heads = model_args['num_attention_heads']  # 32
     config.num_hidden_layers = model_args['num_hidden_layers']      # 32
 
-    model = LlamaForCausalLM(config=config)  # .bfloat16()
+    model = LlamaForCausalLM(config=config, pe_config=pe_config)  # .bfloat16()
 
 rank = torch.distributed.get_rank()
 
@@ -73,14 +94,12 @@ rank = torch.distributed.get_rank()
 # torch.distributed.barrier()
 
 if rank == 0:
-    print('model type is', model_type)
-    if model_type == 'fepe':
-        print('modification: 1d ver., cube / bias, no imag part, exp(xpos), llama config, sqrt scale')  # log+
-    else:
-        print('modification: 2d ver., no imag part, llama config')
+    print('model type is', key, '\n')
+    print(pe_config, '\n')
     print(model_args, '\n')
     print(train_args, '\n')
-    print('model is over !')
+    print('model is over !', '\n')
+    print('modification :', modification, '\n')
 
 tokenizer = AutoTokenizer.from_pretrained('/remote-home/share/llama_hf/7B')
 tokenizer.pad_token_id = 0
@@ -107,8 +126,8 @@ if rank == 0:
 
 # todo：https://huggingface.co/docs/transformers/main_classes/trainer#transformers.TrainingArguments
 
-model_path = str(datetime.now())[:-10].replace('-', '_').replace(' ', '_').replace(':', '_')
-train_args['output_dir'] = '/'.join([train_args['output_dir'], model_path])
+model_path = str(datetime.now())[:10].replace('-', '_').replace(' ', '_').replace(':', '_')
+train_args['output_dir'] = '/'.join([train_args['output_dir'], sys.argv[2], model_path])
 
 if rank == 0:
     print('checkpoints and model will be saved in', train_args['output_dir'])
@@ -125,34 +144,3 @@ if rank == 0:
     print('training is over !')
 
 trainer.save_model(f'{trainer.args.output_dir}/train_last')
-
-# training_args = TrainingArguments(per_device_train_batch_size=4, per_device_eval_batch_size=4,
-#                                   optim='adamw_hf', learning_rate=0.0001, weight_decay=0,
-#                                   num_train_epochs=10, lr_scheduler_type='linear', warmup_ratio=0.1,
-#                                   do_train=True, do_eval=True, bf16=True, bf16_full_eval=True,
-#                                   evaluation_strategy='epoch', eval_accumulation_steps=1,
-#                                   logging_strategy='steps', logging_steps=10,
-#                                   deepspeed=ds_config, output_dir='checkpoints', )
-
-"""
-***** Running eval_128 *****
-eval_128_acc : 0.443337 eval_128_ppl : 21.971549 
-
-***** Running eval_512 *****
-eval_512_acc : 0.436256 eval_512_ppl : 21.593414 
-
-***** Running eval_1024 *****
-eval_1024_acc : 0.427716 eval_1024_ppl : 22.386326 
-
-***** Running eval_2048 *****
-eval_2048_acc : 0.419367 eval_2048_ppl : 22.84397 
-
-***** Running eval_3072 *****
-eval_3072_acc : 0.408405 eval_3072_ppl : 23.885784 
-
-***** Running eval_4096 *****
-eval_4096_acc : 0.401179 eval_4096_ppl : 24.624005 
-
-***** Running eval_5120 *****
-eval_5120_acc : 0.390923 eval_5120_ppl : 26.171258 
-"""
