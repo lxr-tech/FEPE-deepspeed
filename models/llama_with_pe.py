@@ -114,14 +114,14 @@ class LlamaRotaryEmbedding(torch.nn.Module):
                 omega = np.concatenate([omega, omega], axis=-1)
             expos, bias = np.ones_like(omega), np.ones_like(omega)
         self.register_buffer("omega", torch.tensor(omega).to(device), persistent=False)
-        self.register_buffer("expos", torch.tensor(np.sqrt(expos / bias)).to(device), persistent=False)
+        self.register_buffer("expos", torch.tensor(np.sqrt(expos)).to(device), persistent=False)  # / bias
 
         if pe_config['exp']:
             if pe_config['imp']:
                 scale = - torch.log(torch.tensor(omega).to(device)) / math.log(10000) * dim
             else:
                 scale = torch.arange(0, dim, 1 if pe_config['1d'] else 2)
-                scale = torch.cat([scale, scale], dim=-1)
+                scale = scale if pe_config['1d'] else torch.cat([scale, scale], dim=-1)
             self.register_buffer("scale", ((scale + 0.4 * dim) / (1.4 * dim)), persistent=False)
 
     def forward(self, x, seq_len=None):
@@ -246,7 +246,7 @@ class LlamaAttention(nn.Module):
 
         past_key_value = (key_states, value_states) if use_cache else None
 
-        if self.pe_config['flash']:
+        if self.pe_config['flash'] and (not self.training or not self.pe_config['flash_test_only']):
             query_states = query_states.transpose(1, 2)
             key_states = key_states.transpose(1, 2)
             value_states = value_states.transpose(1, 2)
@@ -316,6 +316,7 @@ class LlamaAttention(nn.Module):
 class LlamaDecoderLayer(nn.Module):
     def __init__(self, config: LlamaConfig, pe_config):
         super().__init__()
+        self.pe_config = pe_config
         self.hidden_size = config.hidden_size
         self.self_attn = LlamaAttention(config=config, pe_config=pe_config)
         self.mlp = LlamaMLP(
@@ -351,7 +352,8 @@ class LlamaDecoderLayer(nn.Module):
 
         residual = hidden_states
 
-        hidden_states = self.input_layernorm(hidden_states)
+        if not self.pe_config['post']:
+            hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
@@ -363,6 +365,9 @@ class LlamaDecoderLayer(nn.Module):
             use_cache=use_cache,
         )
         hidden_states = residual + hidden_states
+
+        if self.pe_config['post']:
+            hidden_states = self.input_layernorm(hidden_states)
 
         # Fully Connected
         residual = hidden_states
@@ -600,7 +605,7 @@ class LlamaModel(LlamaPreTrainedModel): # nn.Module
             attention_mask = torch.ones(
                 (batch_size, seq_length_with_past), dtype=torch.bool, device=inputs_embeds.device
             )
-        if not self.pe_config['flash']:
+        if not (self.pe_config['flash'] and (not self.training or not self.pe_config['flash_test_only'])):
             attention_mask = self._prepare_decoder_attention_mask(
                 attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length
             )

@@ -162,8 +162,8 @@ class TrainerForCausalLM(Trainer):
         except:
             eval_seq_len = len(eval_dataset[0]['input_ids'])
 
-        eval_batch_size = min(int(self.args.train_batch_size), max(1,
-                              int(512 * self.args.train_batch_size / eval_seq_len)))
+        eval_batch_size = min(int(self.args.eval_batch_size), max(1,
+                              int(512 * self.args.eval_batch_size / eval_seq_len)))
 
         eval_sampler = self._get_eval_sampler(eval_dataset)
 

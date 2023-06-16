@@ -1,5 +1,6 @@
 import os
-import sys
+import io
+import json
 from datetime import datetime
 
 import torch
@@ -46,12 +47,12 @@ keys = {
 setup_seed(42)
 torch.set_default_dtype(torch.bfloat16)
 
-max_length = 2048
+max_length = 512
 model_tag = 'clm_arxiv_1'
 
-key, modification = sys.argv[2], '' if len(sys.argv) <= 2 else sys.argv[3]
-if key not in keys:
-    raise KeyError(f'{key} is not supported in {list(keys)}')
+key, world_size, modification = sys.argv[2], sys.argv[3], '' if len(sys.argv) <= 3 else sys.argv[4]
+# if key not in keys:
+#     raise KeyError(f'{key} is not supported in {list(keys)}')
 
 if key == 'alibi':
     from models.llama_with_alibi import LlamaForCausalLM
@@ -63,9 +64,13 @@ else:
 assert model_tag in model_args and (model_tag, max_length) in train_args
 
 model_args, train_args = model_args[model_tag], train_args[(model_tag, max_length)]
+head_dim = model_args['hidden_size'] // model_args['num_attention_heads']
 
 pe_config = {'exp': key.__contains__('xpos'), '1d': key.__contains__('1d'),
-             'imp': key.__contains__('imp'), 'log': key.__contains__('log'), 'flash': False}
+             'imp': key.__contains__('imp'), 'log': key.__contains__('log'),
+             'flash': (head_dim <= 64 and key.__contains__('1d')) or (head_dim <= 128 and key.__contains__('2d')),
+             'flash_test_only': (32 < head_dim and key.__contains__('1d')) or (64 < head_dim and key.__contains__('2d')),
+             'post': key.__contains__('post')}  # post_norm for attn only
 
 # todo: https://www.deepspeed.ai/docs/config-json/
 
@@ -126,8 +131,8 @@ if rank == 0:
 
 # todo：https://huggingface.co/docs/transformers/main_classes/trainer#transformers.TrainingArguments
 
-model_path = str(datetime.now())[:10].replace('-', '_').replace(' ', '_').replace(':', '_')
-train_args['output_dir'] = '/'.join([train_args['output_dir'], sys.argv[2], model_path])
+model_path = str(datetime.now())[:10].replace('-', '_') + '-' + key
+train_args['output_dir'] = '/'.join([train_args['output_dir'], model_path])
 
 if rank == 0:
     print('checkpoints and model will be saved in', train_args['output_dir'])
