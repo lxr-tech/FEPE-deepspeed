@@ -140,6 +140,9 @@ class TrainerForCausalLM(Trainer):
                     metrics.update(dataset_metrics)
             else:
                 metrics = self.evaluate(ignore_keys=ignore_keys_for_eval)
+            if self.state.epoch is not None:
+                metrics["epoch"] = round(self.state.epoch, 2)
+            self.control = self.callback_handler.on_evaluate(self.args, self.state, self.control, metrics)
             self._report_to_hp_search(trial, self.state.global_step, metrics)
 
         if self.control.should_save:
@@ -204,8 +207,6 @@ class TrainerForCausalLM(Trainer):
         if rank == 0:
             print(f'\'{metric_key_prefix}_acc\':', all_acc, ',', f'\'{metric_key_prefix}_ppl\':', all_ppl, ',\n')
 
-        return {f'{metric_key_prefix}_acc': all_acc, f'{metric_key_prefix}_ppl': all_ppl}
-
         # start_time = time.time()
         #
         # eval_loop = self.evaluation_loop
@@ -231,7 +232,7 @@ class TrainerForCausalLM(Trainer):
         #     )
         # )
         #
-        # self.log(output.metrics)
+        # self.log({f'{metric_key_prefix}_acc': all_acc, f'{metric_key_prefix}_ppl': all_ppl})
         #
         # if DebugOption.TPU_METRICS_DEBUG in self.args.debug:
         #     # tpu-comment: Logging debug metrics for PyTorch/XLA (compile, execute times, ops, etc.)
@@ -240,6 +241,8 @@ class TrainerForCausalLM(Trainer):
         # self.control = self.callback_handler.on_evaluate(self.args, self.state, self.control, output.metrics)
         #
         # self._memory_tracker.stop_and_update_metrics(output.metrics)
+
+        return {f'{metric_key_prefix}_acc': all_acc, f'{metric_key_prefix}_ppl': all_ppl}
 
     def eval_step(self, batch):
         self.model.eval()

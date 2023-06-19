@@ -100,27 +100,26 @@ class LlamaRotaryEmbedding(torch.nn.Module):
             order, beta = 3,  1 / np.log(10000)  # 0.10861
             start, end = np.power(0.0005, 1 / order), np.power(0.9999, 1 / order)
             if pe_config['1d']:
-                omega = np.power(np.linspace(start, end, dim), order).reshape((1, -1)) * beta * 2
+                omega = torch.pow(torch.linspace(start, end, dim), order).reshape((1, -1)) * beta * 2
             else:
-                omega = np.power(np.linspace(start, end, dim // 2), order).reshape((1, -1)) * beta * 2
-                omega = np.concatenate([omega, omega], axis=-1)
-            expos = (beta / omega) / (1/order * np.power(omega, 1/order - 1) * np.power(2 * beta, -1/order))
-            bias = np.mean((beta / omega) / (1/order * np.power(omega, 1/order - 1) * np.power(2 * beta, -1/order)))
+                omega = torch.pow(torch.linspace(start, end, dim // 2), order).reshape((1, -1)) * beta * 2
+                omega = torch.cat([omega, omega], dim=-1)
+            expos = (beta / omega) / (1/order * torch.pow(omega, 1/order - 1) * math.pow(2 * beta, -1/order))
         else:
             if pe_config['1d']:
-                omega = 1.0 / (10000 ** (np.arange(0, dim, 1) / dim)).reshape((1, -1))
+                omega = 1.0 / (10000 ** (torch.arange(0, dim, 1) / dim)).reshape((1, -1))
             else:
-                omega = 1.0 / (10000 ** (np.arange(0, dim, 2) / dim)).reshape((1, -1))
-                omega = np.concatenate([omega, omega], axis=-1)
-            expos, bias = np.ones_like(omega), np.ones_like(omega)
-        self.register_buffer("omega", torch.tensor(omega).to(device), persistent=False)
-        self.register_buffer("expos", torch.tensor(np.sqrt(expos)).to(device), persistent=False)  # / bias
+                omega = 1.0 / (10000 ** (torch.arange(0, dim, 2) / dim)).reshape((1, -1))
+                omega = torch.cat([omega, omega], dim=-1)
+            expos = torch.ones_like(omega)
+        self.register_buffer("omega", omega.to(device), persistent=False)
+        self.register_buffer("expos", torch.sqrt(expos).to(device), persistent=False)  # / bias
 
         if pe_config['exp']:
             if pe_config['imp']:
-                scale = - torch.log(torch.tensor(omega).to(device)) / math.log(10000) * dim
+                scale = - torch.log(omega.to(device)) / math.log(10000) * dim
             else:
-                scale = torch.arange(0, dim, 1 if pe_config['1d'] else 2)
+                scale = torch.arange(0, dim, 1 if pe_config['1d'] else 2).to(device)
                 scale = scale if pe_config['1d'] else torch.cat([scale, scale], dim=-1)
             self.register_buffer("scale", ((scale + 0.4 * dim) / (1.4 * dim)), persistent=False)
 
@@ -154,11 +153,8 @@ class LlamaMLP(nn.Module):
         self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
         self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
         self.act_fn = ACT2FN[hidden_act]
-        # self.act_fn = nn.GELU()
-        # self.dropout = nn.Dropout(p=0.1)  # todo: add dropout=0.1
 
     def forward(self, x):
-        # return self.dropout(self.down_proj(self.dropout(self.act_fn(self.up_proj(x)))))
         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
@@ -194,7 +190,7 @@ class LlamaAttention(nn.Module):
         # The first two dimensions of cos and sin are always 1, so we can `squeeze` them.
         q, k = q * expos, k * expos
 
-        t = torch.linspace(0, q_len - 1, q_len, device=q.device).reshape(-1, 1)
+        t = torch.arange(q_len, dtype=q.dtype, device=q.device).reshape(-1, 1)
 
         if self.pe_config['1d']:
             q_real = torch.cat([q * cos, q * sin], dim=-1)
@@ -291,7 +287,6 @@ class LlamaAttention(nn.Module):
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
         # attn_weights_ = nn.functional.softmax(attn_weights_, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        # attn_weights = self.dropout(attn_weights)  # todo: add dropout=0.15
         attn_output = torch.matmul(attn_weights, value_states)
         # attn_output_ = torch.matmul(attn_weights_, value_states)
         # attn_output = torch.cat([attn_output, torch.mean(attn_output_, dim=1, keepdim=True)], dim=1)

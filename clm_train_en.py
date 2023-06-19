@@ -17,6 +17,7 @@ from configs.clm_base_en_config import model_args, train_args
 
 import deepspeed
 from transformers.deepspeed import HfDeepSpeedConfig
+from transformers import EarlyStoppingCallback
 
 import sys
 
@@ -56,7 +57,7 @@ key, world_size, modification = sys.argv[2], sys.argv[3], '' if len(sys.argv) <=
 
 if key == 'alibi':
     from models.llama_with_alibi import LlamaForCausalLM
-elif key.startswith('rope') or key.startswith('xpos'):
+elif key.__contains__('rope') or key.__contains__('xpos'):
     from models.llama_with_pe import LlamaForCausalLM
 else:
     raise KeyError('only support rope, xpos and alibi')
@@ -106,7 +107,7 @@ if rank == 0:
     print('model is over !', '\n')
     print('modification :', modification, '\n')
 
-tokenizer = AutoTokenizer.from_pretrained('/remote-home/share/llama_hf/7B')
+tokenizer = AutoTokenizer.from_pretrained('/remote-home/share/llama_hf/7B', use_fast=False)
 tokenizer.pad_token_id = 0
 
 if rank == 0:
@@ -137,11 +138,15 @@ train_args['output_dir'] = '/'.join([train_args['output_dir'], model_path])
 if rank == 0:
     print('checkpoints and model will be saved in', train_args['output_dir'])
 
-training_args = TrainingArguments(deepspeed=ds_config, report_to='none', **train_args)
+training_args = TrainingArguments(deepspeed=ds_config, report_to='none', load_best_model_at_end=True,
+                                  metric_for_best_model='eval_512_ppl', greater_is_better=False,
+                                  **train_args)
 
 trainer = TrainerForCausalLM(model=model, args=training_args, tokenizer=tokenizer,
                              train_dataset=train_dataset, eval_dataset=eval_dataset,
-                             data_collator=DataCollatorForCausalLM(), )
+                             data_collator=DataCollatorForCausalLM(),
+                             callbacks=[EarlyStoppingCallback(early_stopping_patience=1)]
+                             )
 
 trainer.train()
 

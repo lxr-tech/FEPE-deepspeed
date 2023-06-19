@@ -181,14 +181,14 @@ if __name__ == '__main__':
 
     max_length = 8192
 
-    tokenizer = AutoTokenizer.from_pretrained('/remote-home/share/llama_hf/7B')
+    tokenizer = AutoTokenizer.from_pretrained('/remote-home/share/llama_hf/7B', use_fast=False)
     tokenizer.pad_token_id = 0
 
     dataset_info = get_dataset_info('arxiv')
-    dataset_info.extrapolate_lengths = [10240, 9216, 8192, 7168, 6144, 4096, 2048, 1024, 512]
+    dataset_info.extrapolate_lengths = [10240, 9216, 8192, 7168, 6144, 5120, 4096, 3072, 2048, 1024, 512, 128]
 
     test = MyDataloader(max_length, tokenizer, dataset_info, split=dataset_info.test_split, test_note='extra').data
-    train = MyDataloader(max_length, tokenizer, dataset_info, split=dataset_info.train_split).data
+    # train = MyDataloader(max_length, tokenizer, dataset_info, split=dataset_info.train_split).data
 
     # max_length = 2048
     #
