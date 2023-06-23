@@ -107,9 +107,9 @@ class LlamaRotaryEmbedding(torch.nn.Module):
             expos = (beta / omega) / (1/order * torch.pow(omega, 1/order - 1) * math.pow(2 * beta, -1/order))
         else:
             if pe_config['1d']:
-                omega = 1.0 / (10000 ** (torch.arange(0, dim, 1) / dim)).reshape((1, -1))
+                omega = 1.0 / (10000 ** (torch.arange(0, dim, 1).float() / dim)).reshape((1, -1))
             else:
-                omega = 1.0 / (10000 ** (torch.arange(0, dim, 2) / dim)).reshape((1, -1))
+                omega = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim)).reshape((1, -1))
                 omega = torch.cat([omega, omega], dim=-1)
             expos = torch.ones_like(omega)
         self.register_buffer("omega", omega.to(device), persistent=False)
@@ -119,14 +119,13 @@ class LlamaRotaryEmbedding(torch.nn.Module):
             if pe_config['imp']:
                 scale = - torch.log(omega.to(device)) / math.log(10000) * dim
             else:
-                scale = torch.arange(0, dim, 1 if pe_config['1d'] else 2).to(device)
+                scale = torch.arange(0, dim, 1 if pe_config['1d'] else 2).float().to(device)
                 scale = scale if pe_config['1d'] else torch.cat([scale, scale], dim=-1)
             self.register_buffer("scale", ((scale + 0.4 * dim) / (1.4 * dim)), persistent=False)
 
     def forward(self, x, seq_len=None):
-        # x: [bs, num_attention_heads, seq_len, head_size]
-        # This `if` block is unlikely to be run after we build sin/cos in `__init__`. Keep the logic here just in case.
-        t = torch.linspace(1, seq_len, seq_len).to(x.device)
+
+        t = torch.arange(seq_len, device=x.device, dtype=self.omega.dtype)
         theta = self.omega[None, :, None, :] * t[None, None, :, None]
         sin_pos, cos_pos = torch.sin(theta), torch.cos(theta)
 
@@ -180,7 +179,7 @@ class LlamaAttention(nn.Module):
         self.v_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
         self.rotary_emb = LlamaRotaryEmbedding(dim=self.head_dim, pe_config=pe_config)
-        if pe_config['flash']:
+        if pe_config['flash_train'] or pe_config['flash_test']:
             self.flash_attn = FlashAttention(softmax_scale=1 / math.sqrt(self.head_dim), attention_dropout=0.)
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
@@ -242,7 +241,8 @@ class LlamaAttention(nn.Module):
 
         past_key_value = (key_states, value_states) if use_cache else None
 
-        if self.pe_config['flash'] and (not self.training or not self.pe_config['flash_test_only']):
+        # if self.pe_config['flash'] and (not self.training or not self.pe_config['flash_test_only']):
+        if (self.training and self.pe_config['flash_train']) or (not self.training and self.pe_config['flash_test']):
             query_states = query_states.transpose(1, 2)
             key_states = key_states.transpose(1, 2)
             value_states = value_states.transpose(1, 2)
@@ -514,7 +514,8 @@ class LlamaModel(LlamaPreTrainedModel): # nn.Module
 
         self.gradient_checkpointing = True
         # Initialize weights and apply final processing
-        # self.post_init()
+        if pe_config['init']:
+            self.post_init()
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -600,7 +601,8 @@ class LlamaModel(LlamaPreTrainedModel): # nn.Module
             attention_mask = torch.ones(
                 (batch_size, seq_length_with_past), dtype=torch.bool, device=inputs_embeds.device
             )
-        if not (self.pe_config['flash'] and (not self.training or not self.pe_config['flash_test_only'])):
+        # if not (self.pe_config['flash'] and (not self.training or not self.pe_config['flash_test_only'])):
+        if (self.training and not self.pe_config['flash_train']) or (not self.training and not self.pe_config['flash_test']):
             attention_mask = self._prepare_decoder_attention_mask(
                 attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length
             )
@@ -684,7 +686,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel):  # nn.Module
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         # Initialize weights and apply final processing
-        # self.post_init()
+        if pe_config['init']:
+            self.post_init()
 
     def get_input_embeddings(self):
         return self.model.embed_tokens

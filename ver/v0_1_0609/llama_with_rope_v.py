@@ -93,7 +93,7 @@ class LlamaRMSNorm(nn.Module):
 class LlamaRotaryEmbedding(torch.nn.Module):
     def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
         super().__init__()
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 1).float().to(device) / dim))
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float().to(device) / dim))
         self.register_buffer("inv_freq", inv_freq)
 
         # Build here to make `torch.jit.trace` work.
@@ -101,7 +101,7 @@ class LlamaRotaryEmbedding(torch.nn.Module):
         t = torch.arange(self.max_seq_len_cached, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
         freqs = torch.einsum("i,j->ij", t, self.inv_freq)
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
-        # freqs = torch.cat((freqs, freqs), dim=-1)
+        freqs = torch.cat((freqs, freqs), dim=-1)
         self.register_buffer("cos_cached", freqs.cos()[None, None, :, :], persistent=False)
         self.register_buffer("sin_cached", freqs.sin()[None, None, :, :], persistent=False)
 
@@ -113,7 +113,7 @@ class LlamaRotaryEmbedding(torch.nn.Module):
             t = torch.arange(self.max_seq_len_cached, device=x.device, dtype=self.inv_freq.dtype)
             freqs = torch.einsum("i,j->ij", t, self.inv_freq)
             # Different from paper, but it uses a different permutation in order to obtain the same calculation
-            # emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
+            freqs = torch.cat((freqs, freqs), dim=-1).to(x.device)
             self.register_buffer("cos_cached", freqs.cos()[None, None, :, :], persistent=False)
             self.register_buffer("sin_cached", freqs.sin()[None, None, :, :], persistent=False)
         return (
@@ -135,10 +135,10 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids):
     sin = sin.squeeze(1).squeeze(0)  # [seq_len, dim]
     cos = cos[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
     sin = sin[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
-    # q_embed = (q * cos) + (rotate_half(q) * sin)
-    # k_embed = (k * cos) + (rotate_half(k) * sin)
-    q_embed = torch.cat([q * cos, q * sin], dim=-1)
-    k_embed = torch.cat([k * cos, k * sin], dim=-1)
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    # q_embed = torch.cat([q * cos, q * sin], dim=-1)
+    # k_embed = torch.cat([k * cos, k * sin], dim=-1)
     return q_embed, k_embed
 
 
@@ -205,8 +205,8 @@ class LlamaAttention(nn.Module):
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
-        # t = torch.linspace(1, q_len, q_len, device=query_states.device)
-        # query_states = query_states * torch.log(t)[None, None, :, None]
+        t = torch.linspace(1, q_len, q_len, device=query_states.device)
+        query_states = query_states * torch.log(t)[None, None, :, None]
         # [bsz, t, nh, hd]
 
         # # todo: add (exp)+log trick

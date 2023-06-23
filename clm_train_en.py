@@ -59,6 +59,10 @@ if key == 'alibi':
     from models.llama_with_alibi import LlamaForCausalLM
 elif key.__contains__('rope') or key.__contains__('xpos'):
     from models.llama_with_pe import LlamaForCausalLM
+# elif key.__contains__('rope'):
+#     from ver.v0_1_0609.llama_with_rope_v import LlamaForCausalLM
+# elif key.__contains__('xpos'):
+#     from ver.v0_1_0609.llama_with_xpos_v import LlamaForCausalLM
 else:
     raise KeyError('only support rope, xpos and alibi')
 
@@ -69,9 +73,11 @@ head_dim = model_args['hidden_size'] // model_args['num_attention_heads']
 
 pe_config = {'exp': key.__contains__('xpos'), '1d': key.__contains__('1d'),
              'imp': key.__contains__('imp'), 'log': key.__contains__('log'),
-             'flash': (head_dim <= 64 and key.__contains__('1d')) or (head_dim <= 128 and key.__contains__('2d')),
-             'flash_test_only': (32 < head_dim and key.__contains__('1d')) or (64 < head_dim and key.__contains__('2d')),
-             'post': key.__contains__('post')}  # post_norm for attn only
+             'flash_train': False,
+             # (32 < head_dim and key.__contains__('1d')) or (64 < head_dim and key.__contains__('2d')),
+             'flash_test': True,
+             # (head_dim <= 64 and key.__contains__('1d')) or (head_dim <= 128 and key.__contains__('2d')),
+             'post': key.__contains__('post'), 'init': key.__contains__('init'), }  # post_norm for attn only
 
 # todo: https://www.deepspeed.ai/docs/config-json/
 
@@ -132,7 +138,7 @@ if rank == 0:
 
 # todo：https://huggingface.co/docs/transformers/main_classes/trainer#transformers.TrainingArguments
 
-model_path = str(datetime.now())[:10].replace('-', '_') + '-' + key
+model_path = key  # str(datetime.now())[:10].replace('-', '_') + '-' +
 train_args['output_dir'] = '/'.join([train_args['output_dir'], model_path])
 
 if rank == 0:
