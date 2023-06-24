@@ -18,25 +18,25 @@ from models.llama_with_pe import LlamaForCausalLM
 import sys
 
 checkpoints = {
-    'rope_inv_2d_raw': ('ds_clm_rope_arxiv_1_512', 'checkpoints-230531', 'checkpoint-16920'),  # 8460
-    'rope_inv_2d_log': ('ds_clm_rope_arxiv_1l_512', 'checkpoints-230531', 'checkpoint-16920'),  # 12690
-    'rope_inv_1d_raw': ('ds_clm_rope_arxiv_1d_512', 'checkpoints-230531', 'checkpoint-16920'),  # 8460
-    'rope_inv_1d_log': ('ds_clm_rope_arxiv_1dl_512', 'checkpoints-230531', 'checkpoint-16920'),  # (21150)
+    'rope_inv_2d_raw': ('', ''),
+    'rope_inv_2d_log': ('', ''),
+    'rope_inv_1d_raw': ('', ''),
+    'rope_inv_1d_log': ('', ''),
 
-    'xpos_inv_2d_raw': ('2023_06_03_01_02', 'checkpoints', 'checkpoint-16920'),  # 12690
-    'xpos_inv_2d_log': ('ds_clm_xpos_arxiv_1l_512', 'checkpoints-230531', 'checkpoint-16920'),  # 16920
-    'xpos_inv_1d_raw': ('ds_clm_xpos_arxiv_1d_512', 'checkpoints-230531', 'checkpoint-16920'),  # 16920
-    'xpos_inv_1d_log': ('ds_clm_xpos_arxiv_1dl_512', 'checkpoints-230531', 'checkpoint-12690'),  # 16920
+    'xpos_inv_2d_raw': ('', ''),
+    'xpos_inv_2d_log': ('', ''),
+    'xpos_inv_1d_raw': ('', ''),
+    'xpos_inv_1d_log': ('', ''),
 
-    'rope_imp_2d_raw': ('ds_clm_fepe_arxiv_1q_512', 'checkpoints', 'checkpoint-16920'),  # 8460
-    'rope_imp_2d_log': ('2023_06_03_12_04', 'checkpoints', 'checkpoint-16920'),
-    'rope_imp_1d_raw': ('ds_clm_fepe_arxiv_1n_512', 'checkpoints', 'checkpoint-16920'),  # 12690
-    'rope_imp_1d_log': ('ds_clm_fepe_arxiv_1m_512', 'checkpoints', 'checkpoint-16920'),  # (21150)
+    'rope_imp_2d_raw': ('', ''),
+    'rope_imp_2d_log': ('', ''),
+    'rope_imp_1d_raw': ('', ''),
+    'rope_imp_1d_log': ('', ''),
 
-    'xpos_imp_2d_raw': ('ds_clm_fepe_arxiv_1o_512', 'checkpoints', 'checkpoint-16920'),
-    'xpos_imp_2d_log': ('ds_clm_fepe_arxiv_1p_512', 'checkpoints', 'checkpoint-16920'),  # (21150)
-    'xpos_imp_1d_raw': ('ds_clm_fepe_arxiv_1j_512', 'checkpoints', 'checkpoint-12690'),
-    'xpos_imp_1d_log': ('ds_clm_fepe_arxiv_1l_512', 'checkpoints', 'checkpoint-12690'),
+    'xpos_imp_2d_raw': ('', ''),
+    'xpos_imp_2d_log': ('', ''),
+    'xpos_imp_1d_raw': ('', ''),
+    'xpos_imp_1d_log': ('', ''),
 }
 
 setup_seed(42)
@@ -45,22 +45,23 @@ torch.set_default_dtype(torch.bfloat16)
 max_length = 512
 model_tag = 'clm_arxiv_1'
 
+key = sys.argv[2]
+
 assert model_tag in model_args and (model_tag, max_length) in train_args
 
 model_args, train_args = model_args[model_tag], train_args[(model_tag, max_length)]
-
-key = sys.argv[-1]
 
 head_dim = model_args['hidden_size'] // model_args['num_attention_heads']
 
 pe_config = {'exp': key.__contains__('xpos'), '1d': key.__contains__('1d'),
              'imp': key.__contains__('imp'), 'log': key.__contains__('log'),
-             'flash': (head_dim <= 64 and key.__contains__('1d')) or
-                      (head_dim <= 128 and key.__contains__('2d'))}
+             'flash_train': False,
+             # (32 < head_dim and key.__contains__('1d')) or (64 < head_dim and key.__contains__('2d')),
+             'flash_test': True,
+             # (head_dim <= 64 and key.__contains__('1d')) or (head_dim <= 128 and key.__contains__('2d')),
+             'post': key.__contains__('post'), 'init': key.__contains__('init'), }  # post_norm for attn only
 
-folder1, folder2, folder3 = checkpoints[key]
-model_path = f'/remote-home/xrliu/projects/FEPE-deepspeed/{folder2}/{folder1}/{folder3}/pytorch_model.bin'
-# model_path = '/remote-home/xrliu/projects/FEPE-deepspeed/checkpoints/ds_clm_fepe_arxiv_1l_512/checkpoint-16920'
+model_path = f'/remote-home/xrliu/projects/FEPE-deepspeed/checkpoints/{key}/train_last/pytorch_model.bin'
 
 config = AutoConfig.from_pretrained('/remote-home/share/llama_hf/7B')
 config.gradient_checkpointing = True
@@ -103,7 +104,7 @@ train_dataset = MyDataloader(max_length, tokenizer, dataset_info, split=dataset_
 eval_dataset_ = MyDataloader(max_length, tokenizer, dataset_info, split=dataset_info.test_split, test_note='extra').data  #
 
 eval_datasets = {}
-prefix_list = ['512', '1024', '2048', '4096', '6144', '7168', '8192', '9216', '10240', ]  #
+prefix_list = ['512', '1024', '2048', '3072', '4096', '5120', '6144', '7168', '8192', '9216', '10240', ]  #
 # prefix_list = ['128', '512', '1024', '2048', '3072', '4096', '5120', '6144', ]  #
 # 10240, 9216, 8192, 7168, 6144, 4096, 2048, 1024, 512
 
