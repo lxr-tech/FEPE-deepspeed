@@ -53,13 +53,17 @@ model_args, train_args = model_args[model_tag], train_args[(model_tag, max_lengt
 
 head_dim = model_args['hidden_size'] // model_args['num_attention_heads']
 
-pe_config = {'exp': key.__contains__('xpos'), '1d': key.__contains__('1d'),
-             'imp': key.__contains__('imp'), 'log': key.__contains__('log'),
+pe_config = {'1d': key.__contains__('1d'),
+             'exp': key.__contains__('xpos'),
+             'imp': key.__contains__('imp'),
+             'log': key.__contains__('log'),
              'flash_train': False,
              # (32 < head_dim and key.__contains__('1d')) or (64 < head_dim and key.__contains__('2d')),
              'flash_test': True,
              # (head_dim <= 64 and key.__contains__('1d')) or (head_dim <= 128 and key.__contains__('2d')),
-             'post': key.__contains__('post'), 'init': key.__contains__('init'), }  # post_norm for attn only
+             'post': key.__contains__('post'), 'both': key.__contains__('both'),
+             'init': key.__contains__('init'),
+             }
 
 model_path = f'/remote-home/xrliu/projects/FEPE-deepspeed/checkpoints/{key}/train_last/pytorch_model.bin'
 
