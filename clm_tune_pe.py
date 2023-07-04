@@ -1,49 +1,22 @@
-import os
-import io
-import json
-from datetime import datetime
-
 import torch
-import torch.nn.functional as f
 
 from transformers import AutoTokenizer, AutoConfig
 from transformers import Trainer, TrainingArguments
-# from models.llama_with_unk import LlamaForCausalLM
 
 from utils.base import setup_seed
 from utils.clm_tools import MyDataset, MyDataloader, get_dataset_info, DataCollatorForCausalLM
 from utils.clm_trainer import TrainerForCausalLM
-from configs.clm_base_en_config import model_args, train_args
+from configs.clm_tune_config import model_args, train_args
 
 import deepspeed
 from transformers.deepspeed import HfDeepSpeedConfig
+from transformers.deepspeed import deepspeed_init
 from transformers import EarlyStoppingCallback
 
+from models.llama_with_pe import LlamaForCausalLM
+from peft import get_peft_model, LoraConfig, TaskType
+
 import sys
-
-keys = {
-    'alibi': ('', ''),
-
-    'rope_inv_2d_raw': ('', ''),
-    'rope_inv_2d_log': ('', ''),
-    'rope_inv_1d_raw': ('', ''),
-    'rope_inv_1d_log': ('', ''),
-
-    'xpos_inv_2d_raw': ('', ''),
-    'xpos_inv_2d_log': ('', ''),
-    'xpos_inv_1d_raw': ('', ''),
-    'xpos_inv_1d_log': ('', ''),
-
-    'rope_imp_2d_raw': ('', ''),
-    'rope_imp_2d_log': ('', ''),
-    'rope_imp_1d_raw': ('', ''),
-    'rope_imp_1d_log': ('', ''),
-
-    'xpos_imp_2d_raw': ('', ''),
-    'xpos_imp_2d_log': ('', ''),
-    'xpos_imp_1d_raw': ('', ''),
-    'xpos_imp_1d_log': ('', ''),
-}
 
 setup_seed(42)
 torch.set_default_dtype(torch.bfloat16)
@@ -51,68 +24,95 @@ torch.set_default_dtype(torch.bfloat16)
 max_length = 512
 model_tag = 'clm_arxiv_1'
 
-key, world_size, modification = sys.argv[2], sys.argv[3], '' if len(sys.argv) <= 3 else sys.argv[4]
-# if key not in keys:
-#     raise KeyError(f'{key} is not supported in {list(keys)}')
-
-if key == 'alibi':
-    from models.llama_with_alibi import LlamaForCausalLM
-elif key.__contains__('rope') or key.__contains__('xpos'):
-    from models.llama_with_pe import LlamaForCausalLM
-# elif key.__contains__('rope'):
-#     from ver.v0_1_0609.llama_with_rope_v import LlamaForCausalLM
-# elif key.__contains__('xpos'):
-#     from ver.v0_1_0609.llama_with_xpos_v import LlamaForCausalLM
-else:
-    raise KeyError('only support rope, xpos and alibi')
+key = sys.argv[2]
 
 assert model_tag in model_args and (model_tag, max_length) in train_args
 
 model_args, train_args = model_args[model_tag], train_args[(model_tag, max_length)]
+
 head_dim = model_args['hidden_size'] // model_args['num_attention_heads']
 
-pe_config = {'exp': key.__contains__('xpos'), '1d': key.__contains__('1d'),
-             'imp': key.__contains__('imp'), 'log': key.__contains__('log'),
+pe_config = {'1d': key.__contains__('1d'),
+             'exp': key.__contains__('xpos'),
+             'imp': key.__contains__('imp'),
+             'log': True,  # key.__contains__('log'),
              'flash_train': False,
              # (32 < head_dim and key.__contains__('1d')) or (64 < head_dim and key.__contains__('2d')),
              'flash_test': True,
              # (head_dim <= 64 and key.__contains__('1d')) or (head_dim <= 128 and key.__contains__('2d')),
              'post': key.__contains__('post'), 'both': key.__contains__('both'),
-             'init': key.__contains__('init'), }  # post_norm for attn only
+             'init': key.__contains__('init'), 'base': 512,
+             }
 
-# todo: https://www.deepspeed.ai/docs/config-json/
+model_path = f'/remote-home/xrliu/projects/FEPE-deepspeed/checkpoints/{key}/train_last/pytorch_model.bin'
 
-ds_config = 'ds_config.json'
+config = AutoConfig.from_pretrained('/remote-home/share/llama_hf/7B')
+config.gradient_checkpointing = True
+config.torch_dtype = torch.bfloat16
+config.hidden_size = model_args['hidden_size']  # 4096
+config.intermediate_size = model_args['intermediate_size']  # 11008
+config.num_attention_heads = model_args['num_attention_heads']  # 32
+config.num_hidden_layers = model_args['num_hidden_layers']  # 32
+
+ds_config = {
+    "bf16": {
+        "enabled": True
+    },
+    "zero_allow_untested_optimizer": True,
+    "zero_force_ds_cpu_optimizer": False,
+    "zero_optimization": {
+        "stage": 3,
+        "overlap_comm": True,
+        "contiguous_gradients": True,
+        "sub_group_size": 1e7,
+        "stage3_max_live_parameters": 1e7,
+        "stage3_max_reuse_distance": 1e7,
+        "stage3_gather_16bit_weights_on_model_save": True
+    },
+    "gradient_accumulation_steps": 1,
+    "steps_per_print": 2000,
+    "train_batch_size": 48,
+    "wall_clock_breakdown": False
+}
+
 dschf = HfDeepSpeedConfig(ds_config)
 
-# todo: https://github.com/microsoft/DeepSpeed/blob/master/deepspeed/runtime/zero/partition_parameters.py#L603
+model = LlamaForCausalLM(config=config, pe_config=pe_config)  # .float().bfloat16()
 
-with deepspeed.zero.Init(dtype=torch.bfloat16, config_dict_or_path=ds_config):
+state_dict = torch.load(model_path)
+model.load_state_dict(state_dict)
 
-    config = AutoConfig.from_pretrained('/remote-home/share/llama_hf/7B')
-    config.gradient_checkpointing = True
-    config.torch_dtype = torch.bfloat16
-    config.hidden_size = model_args['hidden_size']                  # 4096
-    config.intermediate_size = model_args['intermediate_size']      # 11008
-    config.num_attention_heads = model_args['num_attention_heads']  # 32
-    config.num_hidden_layers = model_args['num_hidden_layers']      # 32
+if hasattr(model, "enable_input_require_grads"):
+    model.enable_input_require_grads()
+else:
+    def make_inputs_require_grad(module, input, output):
+        output.requires_grad_(True)
 
-    model = LlamaForCausalLM(config=config, pe_config=pe_config)  # .bfloat16()
+    model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
+
+peft_config = LoraConfig(r=8, lora_alpha=32, lora_dropout=0.,
+                         target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                                         "up_proj", "gate_proj", "down_proj"],
+                         bias="none", task_type=TaskType.CAUSAL_LM)
+
+model = get_peft_model(model, peft_config)
+
+deepspeed.zero.Init(dtype=torch.bfloat16, config_dict_or_path=ds_config)
 
 rank = torch.distributed.get_rank()
+size = torch.distributed.get_world_size()
 
-# if rank == 0:
-#     import pdb
-#     pdb.set_trace()
-# torch.distributed.barrier()
+# train_args['per_device_train_batch_size'] = 48 // size
+train_args['per_device_eval_batch_size'] = 48 // size
 
 if rank == 0:
     print('model type is', key, '\n')
     print(pe_config, '\n')
+    print(peft_config, '\n')
     print(model_args, '\n')
     print(train_args, '\n')
     print('model is over !', '\n')
-    print('modification :', modification, '\n')
+    model.print_trainable_parameters()
 
 tokenizer = AutoTokenizer.from_pretrained('/remote-home/share/llama_hf/7B', use_fast=False)
 tokenizer.pad_token_id = 0
@@ -126,7 +126,6 @@ eval_dataset_ = MyDataloader(max_length, tokenizer, dataset_info, split=dataset_
 
 eval_dataset = {}
 prefix_list = ['128', '512', '1024', '2048', '3072', '4096', '5120', '6144', ]
-# '256', '768', '1536', '2560', '3584', '4608', '5632', '6656', '7168',
 
 if rank == 0:
     print(prefix_list)
@@ -137,9 +136,7 @@ for prefix in prefix_list:
 if rank == 0:
     print('dataset is over !')
 
-# todo：https://huggingface.co/docs/transformers/main_classes/trainer#transformers.TrainingArguments
-
-model_path = key  # str(datetime.now())[:10].replace('-', '_') + '-' +
+model_path = key + '-' + 'lora_log'
 train_args['output_dir'] = '/'.join([train_args['output_dir'], model_path])
 
 if rank == 0:

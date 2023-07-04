@@ -207,7 +207,8 @@ class LlamaAttention(nn.Module):
             k_real = k_real / scale[None, None, :, :]
 
         if self.pe_config['log']:
-            q_real = q_real * torch.log(t+1)[None, None, :, :]
+            base = math.log(self.pe_config['base']) if 'base' in self.pe_config else 1
+            q_real = q_real * torch.log(t+1)[None, None, :, :] / base
 
         return q_real, k_real  # , q_imag
 

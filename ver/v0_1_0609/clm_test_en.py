@@ -7,7 +7,7 @@ from transformers import Trainer, TrainingArguments
 from utils.base import setup_seed
 from utils.clm_tools import MyDataset, MyDataloader, get_dataset_info, DataCollatorForCausalLM
 from utils.clm_trainer import TrainerForCausalLM
-from configs.clm_base_en_config import model_args, train_args
+from configs.clm_train_config import model_args, train_args
 
 import deepspeed
 from transformers.deepspeed import HfDeepSpeedConfig

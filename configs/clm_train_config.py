@@ -19,7 +19,7 @@ model_args = {
         'hidden_size': 1024, 'intermediate_size': 4096, 'num_attention_heads': 16, 'num_hidden_layers': 16,
     },
     'clm_llama_f': {
-        'hidden_size': 4096, 'intermediate_size': 16384, 'num_attention_heads': 32, 'num_hidden_layers': 32,
+        'hidden_size': 4096, 'intermediate_size': 11008, 'num_attention_heads': 32, 'num_hidden_layers': 32,
     },
 }
 
@@ -39,7 +39,7 @@ train_args = {
         'logging_strategy': 'steps', 'logging_steps': 10, 'output_dir': 'checkpoints', 'save_strategy': 'epoch',
         # 'per_device_train_batch_size': 48, 'per_device_eval_batch_size': 24, 'num_train_epochs': 10,  # 4 cards
         # 'do_train': True, 'do_eval': True, 'bf16': True, 'bf16_full_eval': True, 'optim': 'adamw_hf',
-        # 'learning_rate': 0.0004, 'weight_decay': 0.01, 'lr_scheduler_type': 'linear', 'warmup_ratio': 0.1,
+        # 'learning_rate': 0.0003, 'weight_decay': 0.01, 'lr_scheduler_type': 'linear', 'warmup_ratio': 0.1,
         # 'evaluation_strategy': 'epoch', 'eval_accumulation_steps': 1, 'max_grad_norm': 5.0,
         # 'logging_strategy': 'steps', 'logging_steps': 10, 'output_dir': 'checkpoints', 'save_strategy': 'epoch',
     },
@@ -59,6 +59,13 @@ train_args = {
     },
     ('clm_arxiv_2', 2048): {
         'per_device_train_batch_size': 6, 'per_device_eval_batch_size': 6, 'num_train_epochs': 10,  # 6 cards
+        'do_train': True, 'do_eval': True, 'bf16': True, 'bf16_full_eval': True, 'optim': 'adamw_hf',
+        'learning_rate': 0.0003, 'weight_decay': 0.01, 'lr_scheduler_type': 'linear', 'warmup_ratio': 0.1,
+        'evaluation_strategy': 'epoch', 'eval_accumulation_steps': 1, 'max_grad_norm': 5.0,
+        'logging_strategy': 'steps', 'logging_steps': 10, 'output_dir': 'checkpoints', 'save_strategy': 'epoch',
+    },
+    ('clm_llama_f', 2048): {
+        'per_device_train_batch_size': 2, 'per_device_eval_batch_size': 2, 'num_train_epochs': 10,  # 6 cards
         'do_train': True, 'do_eval': True, 'bf16': True, 'bf16_full_eval': True, 'optim': 'adamw_hf',
         'learning_rate': 0.0003, 'weight_decay': 0.01, 'lr_scheduler_type': 'linear', 'warmup_ratio': 0.1,
         'evaluation_strategy': 'epoch', 'eval_accumulation_steps': 1, 'max_grad_norm': 5.0,
