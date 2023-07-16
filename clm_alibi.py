@@ -12,66 +12,64 @@ import deepspeed
 from transformers.deepspeed import HfDeepSpeedConfig
 from transformers import EarlyStoppingCallback
 
+from models.llama_with_alibi import LlamaForCausalLM
+
 import sys
 
 setup_seed(42)
 torch.set_default_dtype(torch.bfloat16)
 
-max_length = 512
 model_tag = 'clm_arxiv_1'
 
-key, world_size, modification = sys.argv[2], sys.argv[3], '' if len(sys.argv) <= 3 else sys.argv[4]
-# if key not in keys:
-#     raise KeyError(f'{key} is not supported in {list(keys)}')
-
-if key == 'alibi':
-    from models.llama_with_alibi import LlamaForCausalLM
-elif key.__contains__('rope') or key.__contains__('xpos'):
-    from models.llama_with_pe import LlamaForCausalLM
-# elif key.__contains__('rope'):
-#     from ver.v0_1_0609.llama_with_rope_v import LlamaForCausalLM
-# elif key.__contains__('xpos'):
-#     from ver.v0_1_0609.llama_with_xpos_v import LlamaForCausalLM
-else:
-    raise KeyError('only support rope, xpos and alibi')
+max_length, world_size, modification = sys.argv[2], sys.argv[3], '' if len(sys.argv) <= 3 else sys.argv[4]
+max_length = int(max_length)
 
 assert model_tag in model_args and (model_tag, max_length) in train_args
 
 model_args, train_args = model_args[model_tag], train_args[(model_tag, max_length)]
 head_dim = model_args['hidden_size'] // model_args['num_attention_heads']
 
-pe_config = {'exp': key.__contains__('xpos'), '1d': key.__contains__('1d'),
-             'imp': key.__contains__('imp'), 'log': key.__contains__('log'),
-             'flash_train': False,
-             # (32 < head_dim and key.__contains__('1d')) or (64 < head_dim and key.__contains__('2d')),
-             'flash_test': True,
-             # (head_dim <= 64 and key.__contains__('1d')) or (head_dim <= 128 and key.__contains__('2d')),
-             'post': key.__contains__('post'), 'both': key.__contains__('both'),
-             'init': key.__contains__('init'), }  # post_norm for attn only
-
 # todo: https://www.deepspeed.ai/docs/config-json/
 
-ds_config = 'ds_config.json'
+ds_config = {
+    "bf16": {
+        "enabled": True
+    },
+
+    "zero_allow_untested_optimizer": True,
+    "zero_force_ds_cpu_optimizer": False,
+
+    "zero_optimization": {
+        "stage": 3,
+        "overlap_comm": True,
+        "contiguous_gradients": True,
+        "sub_group_size": 1e7,
+        "stage3_max_live_parameters": 1e7,
+        "stage3_max_reuse_distance": 1e7,
+        "stage3_gather_16bit_weights_on_model_save": True
+    },
+
+    "gradient_accumulation_steps": 1,
+    "steps_per_print": 2000,
+    "train_batch_size": train_args['per_device_train_batch_size'] * world_size,
+    "wall_clock_breakdown": False
+}
+
 dschf = HfDeepSpeedConfig(ds_config)
 
 # todo: https://github.com/microsoft/DeepSpeed/blob/master/deepspeed/runtime/zero/partition_parameters.py#L603
 
-with deepspeed.zero.Init(dtype=torch.float32, config_dict_or_path=ds_config):  # bfloat16, float16, float32
+with deepspeed.zero.Init(dtype=torch.bfloat16, config_dict_or_path=ds_config):
 
     config = AutoConfig.from_pretrained('/remote-home/share/llama_hf/7B')
     config.gradient_checkpointing = True
-    config.torch_dtype = torch.float32  # bfloat16, float16, float32
+    config.torch_dtype = torch.bfloat16
     config.hidden_size = model_args['hidden_size']                  # 4096
     config.intermediate_size = model_args['intermediate_size']      # 11008
     config.num_attention_heads = model_args['num_attention_heads']  # 32
     config.num_hidden_layers = model_args['num_hidden_layers']      # 32
 
-    model = LlamaForCausalLM(config=config, pe_config=pe_config)  # .bfloat16()
-
-train_args['bf16'] = False
-train_args['bf16_full_eval'] = False
-train_args['fp16'] = False
-train_args['fp16_full_eval'] = False
+    model = LlamaForCausalLM(config=config)  # .bfloat16()
 
 rank = torch.distributed.get_rank()
 
@@ -81,8 +79,7 @@ rank = torch.distributed.get_rank()
 # torch.distributed.barrier()
 
 if rank == 0:
-    print('model type is', key, '\n')
-    print(pe_config, '\n')
+    print('model type is alibi , max length is', max_length, '\n')
     print(model_args, '\n')
     print(train_args, '\n')
     print('model is over !', '\n')
@@ -100,7 +97,6 @@ eval_dataset_ = MyDataloader(max_length, tokenizer, dataset_info, split=dataset_
 
 eval_dataset = {}
 prefix_list = ['512', '1024', '2048', '3072', '4096', '5120', '6144', '7168', '8192', '9216', '10240', ]  #
-# prefix_list = ['128', '512', '1024', '2048', '3072', '4096', '5120', '6144', ]
 # '256', '768', '1536', '2560', '3584', '4608', '5632', '6656', '7168',
 
 if rank == 0:
@@ -114,14 +110,14 @@ if rank == 0:
 
 # todo：https://huggingface.co/docs/transformers/main_classes/trainer#transformers.TrainingArguments
 
-model_path = key  # str(datetime.now())[:10].replace('-', '_') + '-' +
+model_path = f'alibi-{max_length}'
 train_args['output_dir'] = '/'.join([train_args['output_dir'], model_path])
 
 if rank == 0:
     print('checkpoints and model will be saved in', train_args['output_dir'])
 
 training_args = TrainingArguments(deepspeed=ds_config, report_to='none', load_best_model_at_end=True,
-                                  metric_for_best_model='eval_512_ppl', greater_is_better=False,
+                                  metric_for_best_model=f'eval_{max_length}_ppl', greater_is_better=False,
                                   **train_args)
 
 trainer = TrainerForCausalLM(model=model, args=training_args, tokenizer=tokenizer,

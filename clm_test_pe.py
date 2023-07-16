@@ -31,19 +31,21 @@ model_args, train_args = model_args[model_tag], train_args[(model_tag, max_lengt
 head_dim = model_args['hidden_size'] // model_args['num_attention_heads']
 
 pe_config = {'1d': key.__contains__('1d'),
-             'exp': True,  # key.__contains__('xpos'),
+             'exp': key.__contains__('xpos'),
              'imp': key.__contains__('imp'),
-             'log': True,  # key.__contains__('log'),
+             'log': key.__contains__('log'),
              'flash_train': False,
              # (32 < head_dim and key.__contains__('1d')) or (64 < head_dim and key.__contains__('2d')),
              'flash_test': True,
              # (head_dim <= 64 and key.__contains__('1d')) or (head_dim <= 128 and key.__contains__('2d')),
              'post': key.__contains__('post'), 'both': key.__contains__('both'),
-             'init': key.__contains__('init'), 'base': 512,
+             'init': key.__contains__('init'),  # 'base': 512,
              }
 
 # model_path = f'/remote-home/share/llama_hf/7B/'
-model_path = f'/remote-home/xrliu/projects/FEPE-deepspeed/checkpoints/{key}/train_last/pytorch_model.bin'
+# model_path = f'/remote-home/xrliu/projects/FEPE-deepspeed/checkpoints/{key}/train_last/pytorch_model.bin'
+# model_path = f'/remote-home/xrliu/projects/FEPE-deepspeed/checkpoints/{key}/checkpoint-4230/pytorch_model.bin'
+model_path = f'/remote-home/xrliu/projects/FEPE-deepspeed/checkpoints/init_pre_rope_inv_2d_raw_fp32/train_last/pytorch_model.bin'
 
 config = AutoConfig.from_pretrained('/remote-home/share/llama_hf/7B')
 config.gradient_checkpointing = True
@@ -63,6 +65,11 @@ dschf = HfDeepSpeedConfig(ds_config)
 
 deepspeed.zero.Init(dtype=torch.bfloat16, config_dict_or_path=ds_config)
 
+train_args['bf16'] = False
+train_args['bf16_full_eval'] = False
+train_args['fp16'] = True
+train_args['fp16_full_eval'] = True
+
 rank = torch.distributed.get_rank()
 size = torch.distributed.get_world_size()
 
@@ -74,7 +81,7 @@ if rank == 0:
     print(pe_config, '\n')
     print(model_args, '\n')
     print(train_args, '\n')
-    print('model is over !', '\n')
+    print('model is over !', 'at epoch 1', '\n')
 
 tokenizer = AutoTokenizer.from_pretrained('/remote-home/share/llama_hf/7B', use_fast=False)
 tokenizer.pad_token_id = 0
