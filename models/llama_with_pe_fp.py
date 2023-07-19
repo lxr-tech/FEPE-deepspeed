@@ -74,12 +74,13 @@ def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] 
 
 
 class LlamaRMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6):
+    def __init__(self, hidden_size, fp_config, eps=1e-6):
         """
         LlamaRMSNorm is equivalent to T5LayerNorm
         """
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.fp_config = fp_config
+        self.weight = nn.Parameter(torch.ones(hidden_size, dtype=fp_config['norm_fp']))
         self.variance_epsilon = eps
 
     def forward(self, hidden_states):
@@ -94,7 +95,7 @@ class LlamaRMSNorm(nn.Module):
 
 
 class LlamaRotaryEmbedding(torch.nn.Module):
-    def __init__(self, dim, pe_config, device=None):
+    def __init__(self, dim, pe_config, fp_config, device=None):
         super().__init__()
         if pe_config['imp']:
             order, beta = 3,  1 / np.log(10000)  # 0.10861
@@ -112,8 +113,8 @@ class LlamaRotaryEmbedding(torch.nn.Module):
                 omega = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim)).reshape((1, -1))
                 omega = torch.cat([omega, omega], dim=-1)
             expos = torch.ones_like(omega)
-        self.register_buffer("omega", omega.to(device), persistent=False)
-        self.register_buffer("expos", torch.sqrt(expos).to(device), persistent=False)  # / bias
+        self.register_buffer("omega", omega.to(dtype=fp_config['pe_fp']), persistent=False)
+        self.register_buffer("expos", torch.sqrt(expos).to(dtype=fp_config['pe_fp']), persistent=False)
 
         if pe_config['exp']:
             if pe_config['imp']:
@@ -121,7 +122,7 @@ class LlamaRotaryEmbedding(torch.nn.Module):
             else:
                 scale = torch.arange(0, dim, 1 if pe_config['1d'] else 2).float().to(device)
                 scale = scale if pe_config['1d'] else torch.cat([scale, scale], dim=-1)
-            self.register_buffer("scale", ((scale + 0.4 * dim) / (1.4 * dim)), persistent=False)
+            self.register_buffer("scale", ((scale + 0.4 * dim) / (1.4 * dim)).to(dtype=fp_config['pe_fp']), persistent=False)
 
     def forward(self, x, seq_len=None):
 
@@ -146,24 +147,39 @@ class LlamaMLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
+        fp_config: dict
     ):
         super().__init__()
+        self.fp_config = fp_config
         self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
         self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
         self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
-        self.act_fn = ACT2FN[hidden_act]
+
+        self.act_fn = ACT2FN[hidden_act].to(dtype=fp_config['ffn_fp'])
 
     def forward(self, x):
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        x = x.to(self.fp_config['ffn_fp'])
+        gate_proj = self.gate_proj.weight.t().to(dtype=self.fp_config['ffn_fp'])
+        down_proj = self.down_proj.weight.t().to(dtype=self.fp_config['ffn_fp'])
+        up_proj = self.up_proj.weight.t().to(dtype=self.fp_config['ffn_fp'])
+        # torch.distributed.barrier()
+        #
+        gate_proj = x.matmul(gate_proj)
+        up_proj = x.matmul(up_proj)
+        act_fn = self.act_fn(gate_proj) * up_proj
+        down_proj = act_fn.matmul(down_proj)
+        return down_proj
+        # return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
 class LlamaAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: LlamaConfig, pe_config):
+    def __init__(self, config: LlamaConfig, pe_config, fp_config):
         super().__init__()
         self.config = config
         self.pe_config = pe_config
+        self.fp_config = fp_config
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.head_dim = self.hidden_size // self.num_heads
@@ -178,7 +194,7 @@ class LlamaAttention(nn.Module):
         self.k_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.v_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
-        self.rotary_emb = LlamaRotaryEmbedding(dim=self.head_dim, pe_config=pe_config)
+        self.rotary_emb = LlamaRotaryEmbedding(dim=self.head_dim, pe_config=pe_config, fp_config=fp_config)
         if pe_config['flash_train'] or pe_config['flash_test']:
             self.flash_attn = FlashAttention(softmax_scale=1 / math.sqrt(self.head_dim), attention_dropout=0.)
 
@@ -187,7 +203,7 @@ class LlamaAttention(nn.Module):
 
     def apply_rotary_pos_emb(self, q, k, cos, sin, expos, q_len):
         # The first two dimensions of cos and sin are always 1, so we can `squeeze` them.
-        q, k = q * expos, k * expos
+        q, k = q.to(self.fp_config['pe_fp']) * expos, k.to(self.fp_config['pe_fp']) * expos
 
         t = torch.arange(q_len, dtype=q.dtype, device=q.device).reshape(-1, 1)
 
@@ -208,7 +224,7 @@ class LlamaAttention(nn.Module):
 
         if self.pe_config['log']:
             base = math.log(self.pe_config['base']) if 'base' in self.pe_config else 1
-            q_real = q_real * torch.log(t+1)[None, None, :, :] / base
+            q_real = q_real * torch.log(t+1)[None, None, :, :].to(dtype=q_real.dtype) / base
 
         return q_real, k_real  # , q_imag
 
@@ -223,9 +239,24 @@ class LlamaAttention(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
-        query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = self.k_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        hidden_states = hidden_states.to(dtype=self.fp_config['attn_fp'])
+
+        # query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        # key_states = self.k_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        # value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+
+        q_proj = self.q_proj.weight.t().to(dtype=self.fp_config['attn_fp'])
+        k_proj = self.k_proj.weight.t().to(dtype=self.fp_config['attn_fp'])
+        v_proj = self.v_proj.weight.t().to(dtype=self.fp_config['attn_fp'])
+        o_proj = self.o_proj.weight.t().to(dtype=self.fp_config['attn_fp'])
+        # torch.distributed.barrier()
+
+        query_states = hidden_states.matmul(q_proj).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = hidden_states.matmul(k_proj).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+
+        hidden_states = hidden_states.to(dtype=self.fp_config['attn_fp'])
+
+        value_states = hidden_states.matmul(v_proj).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
 
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
@@ -233,6 +264,8 @@ class LlamaAttention(nn.Module):
         cos, sin, expos = self.rotary_emb(value_states, seq_len=kv_seq_len)
 
         query_states, key_states = self.apply_rotary_pos_emb(query_states, key_states, cos, sin, expos, q_len)
+        query_states = query_states.to(dtype=self.fp_config['attn_fp'])
+        key_states = key_states.to(dtype=self.fp_config['attn_fp'])
         # [bsz, nh, t, hd], query_states_
 
         if past_key_value is not None:
@@ -259,7 +292,7 @@ class LlamaAttention(nn.Module):
 
             attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).to(dtype=query_states.dtype)
 
-            attn_output = self.o_proj(attn_output)
+            attn_output = attn_output.matmul(o_proj)
 
             # if not output_attentions:
             attn_weights = None
@@ -286,7 +319,7 @@ class LlamaAttention(nn.Module):
             # attn_weights_ = torch.max(attn_weights_, torch.tensor(torch.finfo(attn_weights_.dtype).min))
 
         # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(value_states.dtype)
         # attn_weights_ = nn.functional.softmax(attn_weights_, dim=-1, dtype=torch.float32).to(query_states.dtype)
         attn_output = torch.matmul(attn_weights, value_states)
         # attn_output_ = torch.matmul(attn_weights_, value_states)
@@ -301,7 +334,7 @@ class LlamaAttention(nn.Module):
         attn_output = attn_output.transpose(1, 2)
         attn_output = attn_output.reshape(bsz, q_len, -1)
 
-        attn_output = self.o_proj(attn_output)
+        attn_output = attn_output.matmul(o_proj)
 
         if not output_attentions:
             attn_weights = None
@@ -310,18 +343,19 @@ class LlamaAttention(nn.Module):
 
 
 class LlamaDecoderLayer(nn.Module):
-    def __init__(self, config: LlamaConfig, pe_config):
+    def __init__(self, config: LlamaConfig, pe_config, fp_config):
         super().__init__()
         self.pe_config = pe_config
+        self.fp_config = fp_config
         self.hidden_size = config.hidden_size
-        self.self_attn = LlamaAttention(config=config, pe_config=pe_config)
-        self.mlp = LlamaMLP(
-            hidden_size=self.hidden_size,
-            intermediate_size=config.intermediate_size,
-            hidden_act=config.hidden_act,
-        )
-        self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.self_attn = LlamaAttention(config=config, pe_config=pe_config,
+                                        fp_config=fp_config).to(dtype=fp_config['attn_fp'])
+        self.mlp = LlamaMLP(hidden_size=self.hidden_size, intermediate_size=config.intermediate_size,
+                            hidden_act=config.hidden_act, fp_config=fp_config).to(dtype=fp_config['norm_fp'])
+        self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps,
+                                            fp_config=fp_config).to(dtype=fp_config['norm_fp'])
+        self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps,
+                                                     fp_config=fp_config).to(dtype=fp_config['norm_fp'])
 
     def forward(
         self,
@@ -376,6 +410,8 @@ class LlamaDecoderLayer(nn.Module):
 
         if self.pe_config['both']:
             hidden_states = self.post_attention_layernorm(hidden_states)
+
+        hidden_states = hidden_states.to(dtype=self.fp_config['default'])
 
         outputs = (hidden_states,)
 
@@ -508,16 +544,17 @@ class LlamaModel(LlamaPreTrainedModel): # nn.Module
         config: LlamaConfig
     """
 
-    def __init__(self, config: LlamaConfig, pe_config):
+    def __init__(self, config: LlamaConfig, pe_config, fp_config):
         super().__init__(config) #
         # self.config = config
         self.pe_config = pe_config
+        self.fp_config = fp_config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList([LlamaDecoderLayer(config, pe_config) for _ in range(config.num_hidden_layers)])
-        self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.layers = nn.ModuleList([LlamaDecoderLayer(config, pe_config, fp_config) for _ in range(config.num_hidden_layers)])
+        self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps, fp_config=fp_config)
 
         self.gradient_checkpointing = True
         # Initialize weights and apply final processing
@@ -668,7 +705,7 @@ class LlamaModel(LlamaPreTrainedModel): # nn.Module
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
 
-        hidden_states = self.norm(hidden_states)
+        hidden_states = self.norm(hidden_states).to(self.fp_config['default'])
 
         # add hidden states from the last decoder layer
         if output_hidden_states:
@@ -686,10 +723,10 @@ class LlamaModel(LlamaPreTrainedModel): # nn.Module
 
 
 class LlamaForCausalLM(LlamaPreTrainedModel):  # nn.Module
-    def __init__(self, config, pe_config):
-        super().__init__(config) #
+    def __init__(self, config, pe_config, fp_config):
+        super().__init__(config)  #
         # self.config = config
-        self.model = LlamaModel(config, pe_config)
+        self.model = LlamaModel(config, pe_config=pe_config, fp_config=fp_config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         # Initialize weights and apply final processing
