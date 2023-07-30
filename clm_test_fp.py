@@ -26,9 +26,8 @@ parser.add_argument('--post_norm_ffn', type=bool, default=False)
 parser.add_argument('--init', type=bool, default=True)
 
 parser.add_argument('--default', type=str, default='fp32', choices=['fp32', 'fp16', 'bf16'])
-parser.add_argument('--attn_fp', type=str, default='fp32', choices=['fp32', 'fp16', 'bf16'])
-# parser.add_argument('--qk_fp', type=str, default='fp32', choices=['fp32', 'fp16', 'bf16'])
-# parser.add_argument('--vo_fp', type=str, default='fp32', choices=['fp32', 'fp16', 'bf16'])
+parser.add_argument('--qk_fp', type=str, default='fp32', choices=['fp32', 'fp16', 'bf16'])
+parser.add_argument('--vo_fp', type=str, default='fp32', choices=['fp32', 'fp16', 'bf16'])
 parser.add_argument('--pe_fp', type=str, default='fp32', choices=['fp32', 'fp16', 'bf16'])
 parser.add_argument('--ffn_fp', type=str, default='fp32', choices=['fp32', 'fp16', 'bf16'])
 parser.add_argument('--norm_fp', type=str, default='fp32', choices=['fp32', 'fp16', 'bf16'])
@@ -39,7 +38,7 @@ args = parser.parse_args()
 
 fp = {'fp32': torch.float32, 'fp16': torch.float16, 'bf16': torch.bfloat16}
 
-fp_config = {'default': fp[args.default], 'attn_fp': fp[args.attn_fp],  # 'qk_fp': fp[args.qk_fp], 'vo_fp': fp[args.vo_fp],
+fp_config = {'default': fp[args.default], 'qk_fp': fp[args.qk_fp], 'vo_fp': fp[args.vo_fp],
              'norm_fp': fp[args.norm_fp], 'ffn_fp': fp[args.ffn_fp], 'pe_fp': fp[args.pe_fp], }
 
 pe_config = {'exp': args.exp, '1d': args.dim, 'imp': args.imp, 'log': args.log,

@@ -56,11 +56,11 @@ dschf = HfDeepSpeedConfig(ds_config)
 
 # todo: https://github.com/microsoft/DeepSpeed/blob/master/deepspeed/runtime/zero/partition_parameters.py#L603
 
-with deepspeed.zero.Init(dtype=torch.float32, config_dict_or_path=ds_config):  # bfloat16, float16, float32
+with deepspeed.zero.Init(dtype=torch.bfloat16, config_dict_or_path=ds_config):  # bfloat16, float16, float32
 
     config = AutoConfig.from_pretrained('/remote-home/share/llama_hf/7B')
     config.gradient_checkpointing = True
-    config.torch_dtype = torch.float32  # bfloat16, float16, float32
+    config.torch_dtype = torch.bfloat16  # bfloat16, float16, float32
     config.hidden_size = model_args['hidden_size']                  # 4096
     config.intermediate_size = model_args['intermediate_size']      # 11008
     config.num_attention_heads = model_args['num_attention_heads']  # 32
@@ -68,10 +68,10 @@ with deepspeed.zero.Init(dtype=torch.float32, config_dict_or_path=ds_config):  #
 
     model = LlamaForCausalLM(config=config, pe_config=pe_config)  # .bfloat16()
 
-train_args['bf16'] = False
-train_args['bf16_full_eval'] = False
-train_args['fp16'] = False
-train_args['fp16_full_eval'] = False
+# train_args['bf16'] = False
+# train_args['bf16_full_eval'] = False
+# train_args['fp16'] = False
+# train_args['fp16_full_eval'] = False
 
 rank = torch.distributed.get_rank()
 

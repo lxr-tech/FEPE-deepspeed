@@ -98,7 +98,7 @@ class LlamaRotaryEmbedding(torch.nn.Module):
         super().__init__()
         if pe_config['imp']:
             order, beta = 3,  1 / np.log(10000)  # 0.10861
-            start, end = np.power(0.0005, 1 / order), np.power(0.9999, 1 / order)
+            start, end = np.power(0.0005, 1 / order), np.power(1.25, 1 / order)  # 0.9999
             if pe_config['1d']:
                 omega = torch.pow(torch.linspace(start, end, dim), order).reshape((1, -1)) * beta * 2
             else:

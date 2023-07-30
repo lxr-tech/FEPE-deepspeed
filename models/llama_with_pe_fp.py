@@ -190,10 +190,10 @@ class LlamaAttention(nn.Module):
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
                 f" and `num_heads`: {self.num_heads})."
             )
-        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
-        self.k_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
-        self.v_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
+        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False).to(dtype=self.fp_config['qk_fp'])
+        self.k_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False).to(dtype=self.fp_config['qk_fp'])
+        self.v_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False).to(dtype=self.fp_config['vo_fp'])
+        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False).to(dtype=self.fp_config['vo_fp'])
         self.rotary_emb = LlamaRotaryEmbedding(dim=self.head_dim, pe_config=pe_config, fp_config=fp_config)
         if pe_config['flash_train'] or pe_config['flash_test']:
             self.flash_attn = FlashAttention(softmax_scale=1 / math.sqrt(self.head_dim), attention_dropout=0.)
@@ -239,24 +239,20 @@ class LlamaAttention(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
-        hidden_states = hidden_states.to(dtype=self.fp_config['attn_fp'])
-
         # query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         # key_states = self.k_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         # value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
 
-        q_proj = self.q_proj.weight.t().to(dtype=self.fp_config['attn_fp'])
-        k_proj = self.k_proj.weight.t().to(dtype=self.fp_config['attn_fp'])
-        v_proj = self.v_proj.weight.t().to(dtype=self.fp_config['attn_fp'])
-        o_proj = self.o_proj.weight.t().to(dtype=self.fp_config['attn_fp'])
-        # torch.distributed.barrier()
+        hidden_states1 = hidden_states.to(dtype=self.fp_config['qk_fp'])
+        q_proj = self.q_proj.weight.t()  # .to(dtype=self.fp_config['qk_fp'])
+        k_proj = self.k_proj.weight.t()  # .to(dtype=self.fp_config['qk_fp'])
+        query_states = hidden_states1.matmul(q_proj).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = hidden_states1.matmul(k_proj).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
 
-        query_states = hidden_states.matmul(q_proj).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = hidden_states.matmul(k_proj).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-
-        hidden_states = hidden_states.to(dtype=self.fp_config['attn_fp'])
-
-        value_states = hidden_states.matmul(v_proj).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        hidden_states2 = hidden_states.to(dtype=self.fp_config['vo_fp'])
+        v_proj = self.v_proj.weight.t()  # .to(dtype=self.fp_config['vo_fp'])
+        o_proj = self.o_proj.weight.t()  # .to(dtype=self.fp_config['vo_fp'])
+        value_states = hidden_states2.matmul(v_proj).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
 
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
@@ -264,8 +260,8 @@ class LlamaAttention(nn.Module):
         cos, sin, expos = self.rotary_emb(value_states, seq_len=kv_seq_len)
 
         query_states, key_states = self.apply_rotary_pos_emb(query_states, key_states, cos, sin, expos, q_len)
-        query_states = query_states.to(dtype=self.fp_config['attn_fp'])
-        key_states = key_states.to(dtype=self.fp_config['attn_fp'])
+        query_states = query_states.to(dtype=self.fp_config['qk_fp'])
+        key_states = key_states.to(dtype=self.fp_config['qk_fp'])
         # [bsz, nh, t, hd], query_states_
 
         if past_key_value is not None:
@@ -290,7 +286,7 @@ class LlamaAttention(nn.Module):
             if self.pe_config['1d']:
                 attn_output = attn_output[..., :self.head_dim]
 
-            attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).to(dtype=query_states.dtype)
+            attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).to(dtype=self.fp_config['vo_fp'])
 
             attn_output = attn_output.matmul(o_proj)
 
@@ -349,7 +345,7 @@ class LlamaDecoderLayer(nn.Module):
         self.fp_config = fp_config
         self.hidden_size = config.hidden_size
         self.self_attn = LlamaAttention(config=config, pe_config=pe_config,
-                                        fp_config=fp_config).to(dtype=fp_config['attn_fp'])
+                                        fp_config=fp_config)  # .to(dtype=fp_config['attn_fp'])
         self.mlp = LlamaMLP(hidden_size=self.hidden_size, intermediate_size=config.intermediate_size,
                             hidden_act=config.hidden_act, fp_config=fp_config).to(dtype=fp_config['norm_fp'])
         self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps,
